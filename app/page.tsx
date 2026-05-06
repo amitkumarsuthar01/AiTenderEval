@@ -2,13 +2,60 @@
 
 import { useState } from "react";
 import UploadCard from "@/app/components/UploadCard";
-import ResultCard from "@/app/components/ResultCard";
-import ChecklistTable from "@/app/components/ChecklistTable";
-
-import { extractEntities } from "@/lib/extractEntities";
-import { analyzeEligibility } from "@/lib/eligibility";
-
+import ChecklistTable from "./components/ChecklistTable";
 import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { toast, Toaster } from "sonner";
+
+interface AIReport {
+  score: number;
+
+  eligible: boolean;
+
+  riskLevel: string;
+
+  summary: string;
+
+  strengths: string[];
+
+  gaps: string[];
+
+  recommendation: string;
+
+  checklist: {
+    turnover: {
+      required: string;
+      bidder: string;
+      status: boolean;
+    };
+
+    experience: {
+      required: string;
+      bidder: string;
+      status: boolean;
+    };
+
+    certifications: {
+      required: string;
+      bidder: string;
+      status: boolean;
+    };
+
+    projectRelevance: {
+      required: string;
+      bidder: string;
+      status: boolean;
+    };
+  };
+}
+
+interface ResultState {
+  aiReport: AIReport;
+}
+
+function formatCurrency(value: string) {
+  return value.replace(/₹/g, "Rs.").replace(/crore/i, "Crore");
+}
 
 export default function Home() {
   const [tenderFile, setTenderFile] = useState<File | null>(null);
@@ -17,7 +64,7 @@ export default function Home() {
 
   const [loading, setLoading] = useState(false);
 
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<ResultState | null>(null);
 
   const [resetKey, setResetKey] = useState(0);
 
@@ -34,104 +81,167 @@ export default function Home() {
     return res.json();
   }
 
+  function downloadPDF() {
+    if (!result?.aiReport) return;
+
+    const doc = new jsPDF();
+
+    const report = result.aiReport;
+
+    // TITLE
+    doc.setFontSize(22);
+    doc.text("AI Procurement Evaluation Report", 14, 20);
+
+    // SCORE
+    doc.setFontSize(14);
+
+    doc.text(`AI Score: ${report.score}`, 14, 35);
+
+    doc.text(`Risk Level: ${report.riskLevel}`, 14, 45);
+
+    doc.text(
+      `Eligibility: ${report.eligible ? "Eligible" : "Not Eligible"}`,
+      14,
+      55,
+    );
+
+    // SUMMARY
+    doc.setFontSize(16);
+
+    doc.text("Executive Summary", 14, 75);
+
+    doc.setFontSize(12);
+
+    const summaryLines = doc.splitTextToSize(report.summary, 180);
+
+    doc.text(summaryLines, 14, 85);
+
+    // CHECKLIST TABLE
+    autoTable(doc, {
+      startY: 120,
+
+      head: [["Criteria", "Tender Requirement", "Bidder Data", "Status"]],
+
+      body: [
+        [
+          "Turnover",
+          formatCurrency(report.checklist.turnover.required),
+          formatCurrency(report.checklist.turnover.bidder),
+          report.checklist.turnover.status ? "PASS" : "FAIL",
+        ],
+
+        [
+          "Experience",
+          report.checklist.experience.required,
+          report.checklist.experience.bidder,
+          report.checklist.experience.status ? "PASS" : "FAIL",
+        ],
+
+        [
+          "Certifications",
+          report.checklist.certifications.required,
+          report.checklist.certifications.bidder,
+          report.checklist.certifications.status ? "PASS" : "FAIL",
+        ],
+
+        [
+          "Project Relevance",
+          report.checklist.projectRelevance.required,
+          report.checklist.projectRelevance.bidder,
+          report.checklist.projectRelevance.status ? "PASS" : "FAIL",
+        ],
+      ],
+    });
+
+    // STRENGTHS
+    const strengthsY = (doc as any).lastAutoTable.finalY + 20;
+
+    doc.setFontSize(16);
+
+    doc.text("Strengths", 14, strengthsY);
+
+    doc.setFontSize(12);
+
+    report.strengths.forEach((item, index) => {
+      doc.text(`• ${item}`, 18, strengthsY + 10 + index * 8);
+    });
+
+    // GAPS
+    const gapsY = strengthsY + 20 + report.strengths.length * 8;
+
+    doc.setFontSize(16);
+
+    doc.text("Compliance Gaps", 14, gapsY);
+
+    doc.setFontSize(12);
+
+    report.gaps.forEach((item, index) => {
+      doc.text(`• ${item}`, 18, gapsY + 10 + index * 8);
+    });
+
+    // RECOMMENDATION
+    const recommendationY = gapsY + 20 + report.gaps.length * 8;
+
+    doc.setFontSize(16);
+
+    doc.text("Final Recommendation", 14, recommendationY);
+
+    doc.setFontSize(12);
+
+    const recommendationLines = doc.splitTextToSize(report.recommendation, 180);
+
+    doc.text(recommendationLines, 14, recommendationY + 10);
+
+    // SAVE PDF
+    doc.save("AI_Procurement_Report.pdf");
+
+    toast.success("PDF report downloaded successfully");
+  }
+
   async function handleAnalyze() {
-    if (!tenderFile || !bidderFile) return;
+    if (!tenderFile || !bidderFile) {
+      toast.error("Please upload both tender and bidder PDFs");
+
+      return;
+    }
 
     setLoading(true);
 
     try {
+      // PARSE PDFs
       const tenderRes = await parsePDF(tenderFile);
 
       const bidderRes = await parsePDF(bidderFile);
 
-      const tender = extractEntities(tenderRes.text);
+      // AI ANALYSIS
+      const aiRes = await fetch("/api/analyze", {
+        method: "POST",
 
-      const bidder = extractEntities(bidderRes.text);
+        headers: {
+          "Content-Type": "application/json",
+        },
 
-      const analysis = analyzeEligibility(tender, bidder);
+        body: JSON.stringify({
+          tenderText: tenderRes.text,
 
-      const breakdown = {
-        turnover:
-          (bidder.annual_turnover || 0) >= (tender.minimum_turnover || 0),
+          bidderText: bidderRes.text,
+        }),
+      });
 
-        experience:
-          (bidder.years_of_experience || 0) >=
-          (tender.required_experience_years || 0),
-
-        certifications:
-          tender.required_certifications?.every((cert: string) =>
-            bidder.certifications?.includes(cert),
-          ) || false,
-
-        project:
-          bidder.past_project_types?.includes(tender.project_type) || false,
-      };
+      const aiData = await aiRes.json();
 
       setResult({
-        tender,
-        bidder,
-        analysis,
-        breakdown,
+        aiReport: aiData.report,
       });
+
+      toast.success("AI procurement analysis completed");
     } catch (error) {
       console.error(error);
 
-      alert("Error analyzing documents");
+      toast.error("Failed to analyze documents");
     }
 
     setLoading(false);
-  }
-
-  function downloadReport() {
-    if (!result) return;
-
-    const doc = new jsPDF();
-
-    doc.setTextColor(79, 70, 229);
-
-    doc.setFontSize(24);
-
-    doc.text("AI Procurement Evaluation Report", 20, 25);
-
-    doc.setTextColor(0, 0, 0);
-
-    doc.setFontSize(14);
-
-    doc.text(`Final Score: ${result.analysis.score}/100`, 20, 50);
-
-    doc.text(
-      `Eligibility Status: ${
-        result.analysis.eligible ? "Eligible" : "Not Eligible"
-      }`,
-      20,
-      62,
-    );
-
-    doc.text(`Keyword Match Score: ${result.analysis.keywordScore}%`, 20, 74);
-
-    doc.text(`Numeric Match Score: ${result.analysis.numericScore}%`, 20, 86);
-
-    doc.setFontSize(16);
-
-    doc.text("Verified Requirements", 20, 110);
-
-    result.analysis.matchedKeywords.forEach(
-      (keyword: string, index: number) => {
-        doc.text(`• ${keyword}`, 30, 122 + index * 8);
-      },
-    );
-
-    const startY = 140 + result.analysis.matchedKeywords.length * 8;
-
-    doc.text("Compliance Gaps Detected", 20, startY);
-
-    result.analysis.unmatchedKeywords.forEach(
-      (keyword: string, index: number) => {
-        doc.text(`• ${keyword}`, 30, startY + 12 + index * 8);
-      },
-    );
-
-    doc.save("AI_Procurement_Report.pdf");
   }
 
   return (
@@ -139,8 +249,6 @@ export default function Home() {
       <div className="max-w-7xl mx-auto space-y-10">
         {/* HERO */}
         <div className="relative overflow-hidden rounded-[36px] bg-gradient-to-br from-indigo-700 via-violet-700 to-slate-900 p-10 md:p-14 shadow-2xl">
-          <div className="absolute inset-0 opacity-10 bg-[url('/grid.svg')]" />
-
           <div className="relative z-10">
             <div className="inline-flex items-center gap-2 bg-white/10 border border-white/20 backdrop-blur-md px-4 py-2 rounded-full text-white text-sm font-medium mb-6">
               AI Powered Procurement Intelligence
@@ -155,20 +263,6 @@ export default function Home() {
               compliance gaps, and generate AI-powered procurement insights
               instantly.
             </p>
-
-            <div className="flex flex-wrap gap-4 mt-8">
-              <div className="bg-white/10 border border-white/20 backdrop-blur-md px-5 py-3 rounded-2xl text-white">
-                Smart Matching Engine
-              </div>
-
-              <div className="bg-white/10 border border-white/20 backdrop-blur-md px-5 py-3 rounded-2xl text-white">
-                AI Compliance Analysis
-              </div>
-
-              <div className="bg-white/10 border border-white/20 backdrop-blur-md px-5 py-3 rounded-2xl text-white">
-                Eligibility Scoring
-              </div>
-            </div>
           </div>
         </div>
 
@@ -179,10 +273,12 @@ export default function Home() {
               label: "Documents Processed",
               value: "12K+",
             },
+
             {
               label: "Accuracy Rate",
               value: "98.2%",
             },
+
             {
               label: "AI Compliance Checks",
               value: "350+",
@@ -243,130 +339,115 @@ export default function Home() {
         </div>
 
         {/* RESULTS */}
-        {result && (
+        {result?.aiReport && (
           <div className="space-y-8">
-            {/* RESULT CARD */}
-            <div className="bg-white/80 backdrop-blur-xl rounded-[28px] border border-white/40 p-8 shadow-xl">
-              <ResultCard analysis={result.analysis} />
-            </div>
-
-            {/* CHECKLIST */}
-            <ChecklistTable
-              tender={result.tender}
-              bidder={result.bidder}
-              breakdown={result.breakdown}
-            />
-
-            {/* KEYWORDS */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <div className="bg-white/80 backdrop-blur-xl rounded-[28px] border border-white/40 p-6 shadow-xl">
-                <h2 className="text-2xl font-black mb-6 text-slate-800">
-                  Tender Keywords
-                </h2>
-
-                <div className="flex flex-wrap gap-3">
-                  {result.tender.keywords.map((keyword: string) => (
-                    <span
-                      key={keyword}
-                      className="px-4 py-2 bg-indigo-100 text-indigo-700 rounded-full text-sm font-semibold"
-                    >
-                      {keyword}
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              <div className="bg-white/80 backdrop-blur-xl rounded-[28px] border border-white/40 p-6 shadow-xl">
-                <h2 className="text-2xl font-black mb-6 text-slate-800">
-                  Bidder Keywords
-                </h2>
-
-                <div className="flex flex-wrap gap-3">
-                  {result.bidder.keywords.map((keyword: string) => (
-                    <span
-                      key={keyword}
-                      className="px-4 py-2 bg-emerald-100 text-emerald-700 rounded-full text-sm font-semibold"
-                    >
-                      {keyword}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* MATCHING */}
-            <div className="bg-white/80 backdrop-blur-xl rounded-[28px] border border-white/40 p-8 shadow-xl">
-              <h2 className="text-3xl font-black text-slate-800 mb-8">
-                AI Compliance & Requirement Matching
-              </h2>
-
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
+            {/* HEADER */}
+            <div className="bg-white rounded-[32px] p-8 shadow-xl border border-slate-200">
+              <div className="flex items-center justify-between flex-wrap gap-6">
                 <div>
-                  <h3 className="text-xl font-black text-emerald-600 mb-5">
-                    Verified Requirements
-                  </h3>
+                  <h2 className="text-4xl font-black text-slate-900">
+                    AI Procurement Report
+                  </h2>
 
-                  <div className="flex flex-wrap gap-3">
-                    {result.analysis.matchedKeywords.map((keyword: string) => (
-                      <span
-                        key={keyword}
-                        className="px-4 py-2 bg-emerald-100 text-emerald-700 rounded-full text-sm font-bold"
-                      >
-                        {keyword}
-                      </span>
-                    ))}
-                  </div>
+                  <p className="text-slate-500 mt-2 text-lg">
+                    Intelligent procurement evaluation generated by AI
+                  </p>
                 </div>
 
-                <div>
-                  <h3 className="text-xl font-black text-red-600 mb-5">
-                    Compliance Gaps Detected
-                  </h3>
-
-                  <div className="flex flex-wrap gap-3">
-                    {result.analysis.unmatchedKeywords.map(
-                      (keyword: string) => (
-                        <span
-                          key={keyword}
-                          className="px-4 py-2 bg-red-100 text-red-700 rounded-full text-sm font-bold"
-                        >
-                          {keyword}
-                        </span>
-                      ),
-                    )}
-                  </div>
+                <div
+                  className={`px-6 py-3 rounded-2xl text-lg font-bold ${
+                    result.aiReport.eligible
+                      ? "bg-emerald-100 text-emerald-700"
+                      : "bg-red-100 text-red-700"
+                  }`}
+                >
+                  {result.aiReport.eligible ? "Eligible" : "Not Eligible"}
                 </div>
               </div>
             </div>
 
-            {/* NUMBERS */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <div className="bg-white/80 backdrop-blur-xl rounded-[28px] border border-white/40 p-6 shadow-xl">
-                <h2 className="text-2xl font-black mb-5">Tender Numbers</h2>
+            {/* SCORE CARDS */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="bg-white rounded-[28px] p-8 shadow-xl border border-slate-200">
+                <div className="text-slate-500 font-semibold">AI Score</div>
 
-                <div className="flex flex-wrap gap-3">
-                  {result.tender.numbers.map((num: number, i: number) => (
-                    <span
-                      key={i}
-                      className="px-4 py-2 bg-slate-100 rounded-xl font-semibold"
+                <div className="text-6xl font-black mt-3 text-indigo-700">
+                  {result.aiReport.score}
+                </div>
+              </div>
+
+              <div className="bg-white rounded-[28px] p-8 shadow-xl border border-slate-200">
+                <div className="text-slate-500 font-semibold">Risk Level</div>
+
+                <div
+                  className={`text-4xl font-black mt-3 ${
+                    result.aiReport.riskLevel === "Low"
+                      ? "text-emerald-600"
+                      : result.aiReport.riskLevel === "Medium"
+                        ? "text-yellow-600"
+                        : "text-red-600"
+                  }`}
+                >
+                  {result.aiReport.riskLevel}
+                </div>
+              </div>
+
+              <div className="bg-white rounded-[28px] p-8 shadow-xl border border-slate-200">
+                <div className="text-slate-500 font-semibold">
+                  Recommendation
+                </div>
+
+                <div className="text-xl font-bold mt-3 text-slate-800">
+                  {result.aiReport.recommendation}
+                </div>
+              </div>
+            </div>
+
+            {/* SUMMARY */}
+            <div className="bg-white rounded-[28px] p-8 shadow-xl border border-slate-200">
+              <h3 className="text-3xl font-black mb-5">Executive Summary</h3>
+
+              <p className="text-slate-700 leading-8 text-lg">
+                {result.aiReport.summary}
+              </p>
+            </div>
+
+            <ChecklistTable checklist={result.aiReport.checklist} />
+
+            {/* STRENGTHS + GAPS */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* STRENGTHS */}
+              <div className="bg-white rounded-[28px] p-8 shadow-xl border border-emerald-200">
+                <h3 className="text-3xl font-black text-emerald-700 mb-6">
+                  Strengths
+                </h3>
+
+                <div className="space-y-4">
+                  {result.aiReport.strengths.map((item, index) => (
+                    <div
+                      key={index}
+                      className="bg-emerald-50 text-emerald-700 p-4 rounded-2xl"
                     >
-                      {num}
-                    </span>
+                      ✓ {item}
+                    </div>
                   ))}
                 </div>
               </div>
 
-              <div className="bg-white/80 backdrop-blur-xl rounded-[28px] border border-white/40 p-6 shadow-xl">
-                <h2 className="text-2xl font-black mb-5">Bidder Numbers</h2>
+              {/* GAPS */}
+              <div className="bg-white rounded-[28px] p-8 shadow-xl border border-red-200">
+                <h3 className="text-3xl font-black text-red-700 mb-6">
+                  Compliance Gaps
+                </h3>
 
-                <div className="flex flex-wrap gap-3">
-                  {result.bidder.numbers.map((num: number, i: number) => (
-                    <span
-                      key={i}
-                      className="px-4 py-2 bg-slate-100 rounded-xl font-semibold"
+                <div className="space-y-4">
+                  {result.aiReport.gaps.map((item, index) => (
+                    <div
+                      key={index}
+                      className="bg-red-50 text-red-700 p-4 rounded-2xl"
                     >
-                      {num}
-                    </span>
+                      ✗ {item}
+                    </div>
                   ))}
                 </div>
               </div>
@@ -375,12 +456,11 @@ export default function Home() {
             {/* ACTION BUTTONS */}
             <div className="flex flex-wrap gap-5 justify-center">
               <button
-                onClick={downloadReport}
-                className="bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white px-10 py-4 rounded-2xl font-bold shadow-2xl transition-all duration-300 hover:scale-105"
+                onClick={downloadPDF}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white px-10 py-4 rounded-2xl font-bold shadow-lg transition-all duration-300"
               >
-                Download AI Report
+                Download PDF Report
               </button>
-
               <button
                 onClick={() => {
                   setResult(null);
