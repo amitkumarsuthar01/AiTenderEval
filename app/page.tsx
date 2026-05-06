@@ -192,7 +192,10 @@ export default function Home() {
       const tFormData = new FormData();
       tFormData.append("file", tenderFile);
       const tRes = await fetch("/api/parse-pdf", { method: "POST", body: tFormData });
-      if (!tRes.ok) throw new Error("Failed to parse Tender PDF.");
+      if (!tRes.ok) {
+         const tErr = await tRes.json();
+         throw new Error(`Tender PDF error: ${tErr.error}`);
+      }
       const { text: tText } = await tRes.json();
 
       // 2. Parse Bidder
@@ -200,7 +203,10 @@ export default function Home() {
       const bFormData = new FormData();
       bFormData.append("file", bidderFile);
       const bRes = await fetch("/api/parse-pdf", { method: "POST", body: bFormData });
-      if (!bRes.ok) throw new Error("Failed to parse Bidder PDF.");
+      if (!bRes.ok) {
+         const bErr = await bRes.json();
+         throw new Error(`Bidder PDF error: ${bErr.error}`);
+      }
       const { text: bText } = await bRes.json();
 
       if (!apiKey) {
